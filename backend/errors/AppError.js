@@ -28,9 +28,10 @@ class ExternalServiceError extends AppError {
   }
 }
 
+// ✓ c5 - DatabaseError는 statusCode 503을 사용한다
 class DatabaseError extends AppError {
   constructor(message) {
-    super(message || 'Database error', 500);
+    super(message || 'Database error', 503);
   }
 }
 

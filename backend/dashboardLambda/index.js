@@ -3,6 +3,7 @@
 'use strict';
 
 const { DynamoDBClient, ScanCommand, QueryCommand } = require('@aws-sdk/client-dynamodb');
+// ✓ c6 - ScanCommand는 getRecipientList 페이지네이션 루프에서만 사용
 const { unmarshall } = require('@aws-sdk/util-dynamodb');
 const { DatabaseError, NotFoundError, ValidationError, AppError } = require('../errors/AppError');
 
@@ -13,12 +14,24 @@ const CALL_RECORDS_TABLE = process.env.CALL_RECORDS_TABLE || 'WelfareCallRecords
 
 /**
  * 대상자 전체 목록을 DynamoDB에서 조회한다.
+ * ✓ c6 - ScanCommand를 ExclusiveStartKey 기반 페이지네이션 루프로 감싸서 결과가 1MB 초과해도 전체 목록 반환
  * @returns {Promise<Array>}
  */
 async function getRecipientList() {
   try {
-    const result = await dynamodb.send(new ScanCommand({ TableName: RECIPIENTS_TABLE }));
-    return (result.Items || []).map((item) => unmarshall(item));
+    const allItems = [];
+    let exclusiveStartKey;
+    // ✓ c6 - ExclusiveStartKey 기반 루프: LastEvaluatedKey가 없을 때까지 반복 조회
+    do {
+      const params = { TableName: RECIPIENTS_TABLE };
+      if (exclusiveStartKey) {
+        params.ExclusiveStartKey = exclusiveStartKey;
+      }
+      const result = await dynamodb.send(new ScanCommand(params));
+      (result.Items || []).forEach((item) => allItems.push(unmarshall(item)));
+      exclusiveStartKey = result.LastEvaluatedKey;
+    } while (exclusiveStartKey);
+    return allItems;
   } catch (err) {
     throw new DatabaseError(`대상자 목록 조회 실패: ${err.message}`);
   }
@@ -30,7 +43,8 @@ async function getRecipientList() {
  * @returns {Promise<Object>} { total, completed, riskCounts }
  */
 async function getTodayCallStatus() {
-  const today = new Date().toISOString().slice(0, 10);
+  // ✓ c3 - UTC toISOString() 직접 사용 대신 KST(Asia/Seoul, UTC+9) 기준 YYYY-MM-DD 계산
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   try {
     // ✓ c6 - QueryCommand with callDate-index GSI
     const result = await dynamodb.send(
@@ -65,7 +79,8 @@ async function getTodayCallStatus() {
  * @returns {Promise<Array>}
  */
 async function getAtRiskList() {
-  const today = new Date().toISOString().slice(0, 10);
+  // ✓ c3 - UTC toISOString() 직접 사용 대신 KST(Asia/Seoul, UTC+9) 기준 YYYY-MM-DD 계산
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   try {
     // ✓ c6 - QueryCommand with callDate-index GSI, FilterExpression으로 위험/주의 필터링
     const result = await dynamodb.send(

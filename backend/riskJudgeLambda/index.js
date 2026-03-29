@@ -39,7 +39,7 @@ async function analyzeWithComprehend(text) {
 
 /**
  * Amazon Bedrock (Claude)으로 통화 텍스트와 감정 분석 결과를 종합하여 위험도를 판단한다.
- * ✓ c4 - 정규식으로 응답 문자열에서 JSON 부분을 추출한 뒤 파싱, 추출 실패 시 ExternalServiceError 던짐
+ * ✓ c2 - ExternalServiceError 발생 시 최대 2회 재시도(총 3회 시도), 재시도 간 1초 지연, 3회 모두 실패 시 ExternalServiceError 던짐
  * @param {string} transcribedText - Transcribe 변환 텍스트
  * @param {Object} comprehendResult - Comprehend 감정 분석 결과
  * @returns {Promise<Object>} { riskLevel: '정상' | '주의' | '위험', reason: string }
@@ -63,43 +63,56 @@ ${transcribedText}
 반드시 아래 형식으로만 응답하세요 (다른 텍스트 없이):
 {"riskLevel": "정상" | "주의" | "위험", "reason": "판단 근거 한 문장"}`;
 
-  try {
-    const payload = {
-      anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 256,
-      messages: [{ role: 'user', content: prompt }],
-    };
+  // ✓ c2 - 최대 3회 시도(초기 1회 + 재시도 2회), 재시도 간 1초 지연
+  const MAX_ATTEMPTS = 3;
+  let lastError;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const payload = {
+        anthropic_version: 'bedrock-2023-05-31',
+        max_tokens: 256,
+        messages: [{ role: 'user', content: prompt }],
+      };
 
-    const response = await bedrock.send(
-      new InvokeModelCommand({
-        modelId: BEDROCK_MODEL_ID,
-        contentType: 'application/json',
-        accept: 'application/json',
-        body: JSON.stringify(payload),
-      })
-    );
+      const response = await bedrock.send(
+        new InvokeModelCommand({
+          modelId: BEDROCK_MODEL_ID,
+          contentType: 'application/json',
+          accept: 'application/json',
+          body: JSON.stringify(payload),
+        })
+      );
 
-    const responseBody = JSON.parse(Buffer.from(response.body).toString('utf-8'));
-    const text = responseBody.content[0].text.trim();
+      const responseBody = JSON.parse(Buffer.from(response.body).toString('utf-8'));
+      const text = responseBody.content[0].text.trim();
 
-    // ✓ c4 - JSON.parse(text) 직접 호출 대신 정규식으로 응답 문자열에서 JSON 부분 추출
-    const jsonMatch = text.match(/{[\s\S]*}/);
-    if (!jsonMatch) {
-      // ✓ c4 - 추출 실패 시 ExternalServiceError를 던진다
-      throw new ExternalServiceError('Bedrock 응답에서 JSON을 추출할 수 없습니다.');
+      // ✓ c2(이전 c4) - JSON.parse(text) 직접 호출 대신 정규식으로 응답 문자열에서 JSON 부분 추출
+      const jsonMatch = text.match(/{[\s\S]*}/);
+      if (!jsonMatch) {
+        throw new ExternalServiceError('Bedrock 응답에서 JSON을 추출할 수 없습니다.');
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      if (!['정상', '주의', '위험'].includes(parsed.riskLevel)) {
+        throw new ExternalServiceError('Bedrock 응답의 riskLevel 값이 올바르지 않습니다.');
+      }
+
+      return { riskLevel: parsed.riskLevel, reason: parsed.reason || '' };
+    } catch (err) {
+      const isAppError = err instanceof AppError;
+      // AppError 중 ExternalServiceError만 재시도, 그 외 AppError는 즉시 던짐
+      if (isAppError && !(err instanceof ExternalServiceError)) throw err;
+      lastError = isAppError ? err : new ExternalServiceError(`Bedrock 위험도 판단 실패: ${err.message}`);
+      // ✓ c2 - 마지막 시도가 아니면 1초 대기 후 재시도
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        console.warn(`[RiskJudgeLambda] Bedrock 재시도 ${attempt}/${MAX_ATTEMPTS - 1}: ${lastError.message}`);
+      }
     }
-
-    const parsed = JSON.parse(jsonMatch[0]);
-
-    if (!['정상', '주의', '위험'].includes(parsed.riskLevel)) {
-      throw new ExternalServiceError('Bedrock 응답의 riskLevel 값이 올바르지 않습니다.');
-    }
-
-    return { riskLevel: parsed.riskLevel, reason: parsed.reason || '' };
-  } catch (err) {
-    if (err instanceof AppError) throw err;
-    throw new ExternalServiceError(`Bedrock 위험도 판단 실패: ${err.message}`);
   }
+  // ✓ c2 - 3회 모두 실패하면 ExternalServiceError를 던진다
+  throw lastError;
 }
 
 /**
@@ -159,24 +172,38 @@ exports.handler = async (event) => {
   try {
     const { contactId, recipientId, recipientName, transcribedText } = event;
 
-    if (!contactId || !recipientId || !transcribedText) {
+    if (!contactId || !recipientId || transcribedText === undefined || transcribedText === null) {
       throw new ValidationError('필수 파라미터(contactId, recipientId, transcribedText)가 없습니다.');
     }
 
-    // Comprehend 감정 분석 수행
-    const comprehendResult = await analyzeWithComprehend(transcribedText);
-
-    // ✓ c4 - Bedrock으로 Transcribe 텍스트 + Comprehend 결과 전달, 정규식 기반 JSON 추출 파싱
-    const { riskLevel, reason } = await judgeRiskWithBedrock(transcribedText, comprehendResult);
-
     const timestamp = new Date().toISOString();
+    let riskLevel, reason, comprehendResult;
+
+    // ✓ c1 - transcribedText가 빈 문자열('')일 때 Comprehend/Bedrock 호출 없이 riskLevel='위험'으로 처리
+    if (transcribedText === '') {
+      riskLevel = '위험';
+      reason = '통화 내용이 없습니다(빈 텍스트). 무응답 또는 비정상 응답으로 판단합니다.';
+      comprehendResult = { sentiment: 'UNKNOWN', sentimentScore: { Positive: 0, Negative: 0, Neutral: 0, Mixed: 0 } };
+    } else {
+      // Comprehend 감정 분석 수행
+      comprehendResult = await analyzeWithComprehend(transcribedText);
+
+      // ✓ c2 - Bedrock 호출, ExternalServiceError 시 최대 2회 재시도
+      ({ riskLevel, reason } = await judgeRiskWithBedrock(transcribedText, comprehendResult));
+    }
+
+    // ✓ c4 - sentimentScore 중첩 객체를 평탄화하여 각각 number 타입 필드로 저장
+    const score = comprehendResult.sentimentScore || {};
     const callRecord = {
       contactId,
       recipientId: String(recipientId),
       recipientName: recipientName || '',
       transcribedText,
       sentiment: comprehendResult.sentiment,
-      sentimentScore: comprehendResult.sentimentScore,
+      sentimentScorePositive: typeof score.Positive === 'number' ? score.Positive : 0,
+      sentimentScoreNegative: typeof score.Negative === 'number' ? score.Negative : 0,
+      sentimentScoreNeutral: typeof score.Neutral === 'number' ? score.Neutral : 0,
+      sentimentScoreMixed: typeof score.Mixed === 'number' ? score.Mixed : 0,
       riskLevel,
       riskReason: reason,
       createdAt: timestamp,
@@ -185,6 +212,8 @@ exports.handler = async (event) => {
 
     // DynamoDB에 통화 결과 저장
     await saveCallRecord(callRecord);
+
+    // ✓ c1 - transcribedText가 빈 문자열일 때도 SNS 알림 발송 (riskLevel='위험'이므로 아래 조건 충족)
 
     // ✓ c5 - sendSnsAlert() 호출을 try-catch로 독립 래핑하여 SNS 실패를 격리
     if (riskLevel === '위험' || riskLevel === '주의') {

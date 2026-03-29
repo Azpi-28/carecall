@@ -21,7 +21,8 @@ const CONNECT_SOURCE_PHONE = process.env.CONNECT_SOURCE_PHONE;
  * @returns {Promise<Array>} 대상자 목록
  */
 async function fetchTodayRecipients() {
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  // ✓ c3 - UTC toISOString() 직접 사용 대신 KST(Asia/Seoul, UTC+9) 기준 YYYY-MM-DD 계산
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   try {
     // ✓ c1 - QueryCommand with callDate GSI
     const result = await dynamodb.send(
