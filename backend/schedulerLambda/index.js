@@ -11,9 +11,6 @@ const connect = new ConnectClient({ region: process.env.AWS_REGION || 'ap-northe
 
 const RECIPIENTS_TABLE = process.env.RECIPIENTS_TABLE || 'WelfareRecipients';
 const CALL_RESULTS_TABLE = process.env.CALL_RESULTS_TABLE || RECIPIENTS_TABLE;
-const CONNECT_INSTANCE_ID = process.env.CONNECT_INSTANCE_ID;
-const CONNECT_CONTACT_FLOW_ID = process.env.CONNECT_CONTACT_FLOW_ID;
-const CONNECT_SOURCE_PHONE = process.env.CONNECT_SOURCE_PHONE;
 
 /**
  * 오늘 발신 대상자 목록을 DynamoDB QueryCommand(callDate GSI)로 조회한다.
@@ -49,16 +46,20 @@ async function fetchTodayRecipients() {
  * @returns {Promise<string>} contactId
  */
 async function startOutboundCall(recipient) {
-  if (!CONNECT_INSTANCE_ID || !CONNECT_CONTACT_FLOW_ID || !CONNECT_SOURCE_PHONE) {
+  // ✓ c3 - 매 호출마다 process.env를 직접 참조하여 테스트에서 임시 삭제/복원해도 최신 값을 읽음
+  const instanceId = process.env.CONNECT_INSTANCE_ID;
+  const contactFlowId = process.env.CONNECT_CONTACT_FLOW_ID;
+  const sourcePhone = process.env.CONNECT_SOURCE_PHONE;
+  if (!instanceId || !contactFlowId || !sourcePhone) {
     throw new ExternalServiceError('Connect 환경 변수가 설정되지 않았습니다.');
   }
   try {
     const response = await connect.send(
       new StartOutboundVoiceContactCommand({
         DestinationPhoneNumber: recipient.phoneNumber,
-        ContactFlowId: CONNECT_CONTACT_FLOW_ID,
-        InstanceId: CONNECT_INSTANCE_ID,
-        SourcePhoneNumber: CONNECT_SOURCE_PHONE,
+        ContactFlowId: contactFlowId,
+        InstanceId: instanceId,
+        SourcePhoneNumber: sourcePhone,
         Attributes: {
           recipientId: String(recipient.recipientId),
           recipientName: String(recipient.name || ''),
