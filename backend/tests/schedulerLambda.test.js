@@ -109,10 +109,42 @@ describe('schedulerLambda', () => {
     const result = await handler({});
     const body = JSON.parse(result.body);
 
-    // Connect 환경변수 없으면 ExternalServiceError(502) 발생하지만
-    // 개별 발신 에러는 errors 배열에 누적되므로 전체 statusCode는 200
-    expect(body.failed).toBe(1);
+    // ✓ c3 - 환경변수 누락 시 handler 최상단에서 ExternalServiceError(502)로 즉시 반환
+    expect(result.statusCode).toBe(502);
 
     process.env.CONNECT_INSTANCE_ID = originalInstanceId;
+  });
+
+  // ✓ c2 - Connect 발신 성공 후 saveDialResult DynamoDB 저장 실패 시: 전체 statusCode 200, dialed 카운트 증가, 처리 중단 없음
+  test('Connect 발신 성공 후 saveDialResult DynamoDB 저장 실패 시 statusCode 200이고 dialed 카운트가 증가한다', async () => {
+    // DynamoDB QueryCommand(fetchTodayRecipients)는 성공, PutItemCommand(saveDialResult)는 실패
+    mockDynamoSend
+      .mockResolvedValueOnce({
+        Items: [
+          { recipientId: { S: 'r1' }, phoneNumber: { S: '+82101111111' }, name: { S: '홍길동' } },
+          { recipientId: { S: 'r2' }, phoneNumber: { S: '+82102222222' }, name: { S: '김영희' } },
+        ],
+      })
+      // saveDialResult - r1 저장 실패
+      .mockRejectedValueOnce(new Error('DynamoDB PutItem 실패'))
+      // saveDialResult - r2 저장 실패
+      .mockRejectedValueOnce(new Error('DynamoDB PutItem 실패'));
+
+    // Connect 발신은 두 건 모두 성공
+    mockConnectSend
+      .mockResolvedValueOnce({ ContactId: 'contact-001' })
+      .mockResolvedValueOnce({ ContactId: 'contact-002' });
+
+    const result = await handler({});
+    const body = JSON.parse(result.body);
+
+    // ✓ c2 - 전체 statusCode는 200이어야 함
+    expect(result.statusCode).toBe(200);
+    // ✓ c2 - Connect 발신은 성공했으므로 dialed 카운트 2 증가
+    expect(body.dialed).toBe(2);
+    // ✓ c2 - Connect 발신 실패는 0
+    expect(body.failed).toBe(0);
+    // ✓ c2 - 처리가 중단되지 않고 Connect는 2회 호출됨
+    expect(mockConnectSend).toHaveBeenCalledTimes(2);
   });
 });

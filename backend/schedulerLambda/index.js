@@ -37,7 +37,9 @@ async function fetchTodayRecipients() {
     );
     return (result.Items || []).map((item) => unmarshall(item));
   } catch (err) {
-    throw new DatabaseError(`DynamoDB 대상자 조회 실패: ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[SchedulerLambda] DynamoDB 대상자 조회 실패:', err);
+    throw new DatabaseError('DynamoDB 대상자 조회에 실패했습니다.');
   }
 }
 
@@ -65,7 +67,9 @@ async function startOutboundCall(recipient) {
     );
     return response.ContactId;
   } catch (err) {
-    throw new ExternalServiceError(`Connect 발신 실패 (${recipient.recipientId}): ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error(`[SchedulerLambda] Connect 발신 실패 (${recipient.recipientId}):`, err);
+    throw new ExternalServiceError(`Connect 발신에 실패했습니다. (recipientId: ${recipient.recipientId})`);
   }
 }
 
@@ -84,10 +88,15 @@ async function saveDialResult({ recipientId, contactId, status, calledAt }) {
           { recipientId: String(recipientId), contactId, status, calledAt },
           { removeUndefinedValues: true }
         ),
+        // ✓ c4 - 동일 contactId로 재호출 시 ConditionalCheckFailedException 발생
+        ConditionExpression: 'attribute_not_exists(contactId)',
       })
     );
   } catch (err) {
-    throw new DatabaseError(`DynamoDB 발신 결과 저장 실패: ${err.message}`);
+    // ✓ c4 - ConditionalCheckFailedException을 DatabaseError로 감싸 처리
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[SchedulerLambda] DynamoDB 발신 결과 저장 실패:', err);
+    throw new DatabaseError('DynamoDB 발신 결과 저장에 실패했습니다.');
   }
 }
 
@@ -98,6 +107,11 @@ async function saveDialResult({ recipientId, contactId, status, calledAt }) {
  */
 exports.handler = async (event) => {
   try {
+    // ✓ c3 - handler 최상단에서 필수 환경변수 검증, 누락 시 즉시 ExternalServiceError 던짐
+    if (!process.env.CONNECT_INSTANCE_ID || !process.env.CONNECT_CONTACT_FLOW_ID || !process.env.CONNECT_SOURCE_PHONE) {
+      throw new ExternalServiceError('필수 환경변수(CONNECT_INSTANCE_ID, CONNECT_CONTACT_FLOW_ID, CONNECT_SOURCE_PHONE)가 설정되지 않았습니다.');
+    }
+
     // ✓ c1 - DynamoDB QueryCommand(callDate GSI)로 오늘 발신 대상자 목록 조회
     const recipients = await fetchTodayRecipients();
     if (recipients.length === 0) {

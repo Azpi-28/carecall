@@ -126,4 +126,73 @@ describe('riskJudgeLambda', () => {
     // ✓ c5 - DatabaseError catch 시 HTTP 503 반환 검증
     expect(result.statusCode).toBe(503);
   });
+
+  // ✓ c1 - transcribedText가 빈 문자열('')일 때: riskLevel='위험', Comprehend/Bedrock 미호출, SNS 1회 발송
+  test('transcribedText가 빈 문자열일 때 위험으로 판단하고 Comprehend/Bedrock 미호출, SNS 1회 발송', async () => {
+    mockDynamoSend.mockResolvedValueOnce({});
+    mockSnsSend.mockResolvedValueOnce({});
+
+    const result = await handler({ ...baseEvent, transcribedText: '' });
+    const body = JSON.parse(result.body);
+
+    // ✓ c1 - riskLevel이 '위험'이어야 함
+    expect(result.statusCode).toBe(200);
+    expect(body.riskLevel).toBe('위험');
+    // ✓ c1 - Comprehend와 Bedrock은 호출되지 않아야 함
+    expect(mockComprehendSend).not.toHaveBeenCalled();
+    expect(mockBedrockSend).not.toHaveBeenCalled();
+    // ✓ c1 - SNS는 정확히 1회 발송되어야 함
+    expect(mockSnsSend).toHaveBeenCalledTimes(1);
+    // ✓ c1 - DynamoDB 저장은 정상 완료되어야 함
+    expect(mockDynamoSend).toHaveBeenCalledTimes(1);
+  });
+
+  // ✓ c1 - Bedrock이 첫 2회 실패 후 3회째 성공: statusCode 200, 올바른 riskLevel 반환
+  test('Bedrock이 첫 2회 실패 후 3회째 성공 시 statusCode 200과 올바른 riskLevel 반환', async () => {
+    jest.useFakeTimers();
+    mockComprehendSend.mockResolvedValueOnce(comprehendOk);
+    // 첫 번째, 두 번째 Bedrock 호출 실패
+    mockBedrockSend
+      .mockRejectedValueOnce(new Error('Bedrock 일시적 오류'))
+      .mockRejectedValueOnce(new Error('Bedrock 일시적 오류'))
+      // 세 번째 호출 성공
+      .mockResolvedValueOnce(makeBedrockResponse('주의', '재시도 후 성공'));
+    mockDynamoSend.mockResolvedValueOnce({});
+    mockSnsSend.mockResolvedValueOnce({});
+
+    // ✓ c1 - 재시도 지연(1초)을 가짜 타이머로 처리하여 테스트 속도 확보
+    const handlerPromise = handler(baseEvent);
+    // 재시도 타이머 2회 진행
+    await jest.runAllTimersAsync();
+    const result = await handlerPromise;
+    const body = JSON.parse(result.body);
+
+    jest.useRealTimers();
+
+    // ✓ c1 - 3회째 성공 시 statusCode 200과 올바른 riskLevel 반환
+    expect(result.statusCode).toBe(200);
+    expect(body.riskLevel).toBe('주의');
+    // Bedrock은 총 3회 호출되어야 함
+    expect(mockBedrockSend).toHaveBeenCalledTimes(3);
+  });
+
+  // ✓ c1 - SNS 발송 실패 시에도 statusCode 200이 반환되고 DynamoDB 저장은 정상 완료됨
+  test('SNS 발송 실패 시에도 statusCode 200이 반환되고 DynamoDB 저장은 정상 완료됨', async () => {
+    mockComprehendSend.mockResolvedValueOnce(comprehendOk);
+    mockBedrockSend.mockResolvedValueOnce(makeBedrockResponse('위험', '위험 감지'));
+    mockDynamoSend.mockResolvedValueOnce({});
+    // SNS 발송 실패
+    mockSnsSend.mockRejectedValueOnce(new Error('SNS 연결 오류'));
+
+    const result = await handler(baseEvent);
+    const body = JSON.parse(result.body);
+
+    // ✓ c1 - SNS 실패와 무관하게 statusCode 200 반환
+    expect(result.statusCode).toBe(200);
+    expect(body.riskLevel).toBe('위험');
+    // ✓ c1 - DynamoDB 저장은 정상 완료
+    expect(mockDynamoSend).toHaveBeenCalledTimes(1);
+    // SNS는 호출 시도했으나 실패
+    expect(mockSnsSend).toHaveBeenCalledTimes(1);
+  });
 });

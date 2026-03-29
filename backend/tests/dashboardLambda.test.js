@@ -120,6 +120,57 @@ describe('dashboardLambda', () => {
     });
   });
 
+  // ✓ c6 - getTodayCallStatus 페이지네이션: LastEvaluatedKey 있는 첫 응답 후 두 번째 호출로 나머지 데이터 조회
+  describe('페이지네이션', () => {
+    test('GET /calls/today - LastEvaluatedKey 있을 때 두 번째 호출로 나머지 데이터를 가져온다', async () => {
+      const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+      // ✓ c6 - 첫 번째 응답: LastEvaluatedKey 포함
+      mockSend
+        .mockResolvedValueOnce({
+          Items: [makeItem({ contactId: 'c1', riskLevel: '정상', callDate: today })],
+          LastEvaluatedKey: { contactId: { S: 'c1' }, callDate: { S: today } },
+        })
+        // ✓ c6 - 두 번째 응답: LastEvaluatedKey 없음 (마지막 페이지)
+        .mockResolvedValueOnce({
+          Items: [makeItem({ contactId: 'c2', riskLevel: '위험', callDate: today })],
+        });
+
+      const result = await handler(makeEvent('GET', '/calls/today'));
+      const body = JSON.parse(result.body);
+
+      expect(result.statusCode).toBe(200);
+      // ✓ c6 - 두 페이지 합산 결과(2건)가 반환되어야 함
+      expect(body.total).toBe(2);
+      expect(body.riskCounts['정상']).toBe(1);
+      expect(body.riskCounts['위험']).toBe(1);
+      // ✓ c6 - DynamoDB QueryCommand가 2회 호출되어야 함
+      expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    test('GET /calls/at-risk - LastEvaluatedKey 있을 때 두 번째 호출로 나머지 데이터를 가져온다', async () => {
+      const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+      // ✓ c6 - 첫 번째 응답: LastEvaluatedKey 포함
+      mockSend
+        .mockResolvedValueOnce({
+          Items: [makeItem({ contactId: 'c1', riskLevel: '위험', recipientId: 'r1', callDate: today })],
+          LastEvaluatedKey: { contactId: { S: 'c1' }, callDate: { S: today } },
+        })
+        // ✓ c6 - 두 번째 응답: LastEvaluatedKey 없음 (마지막 페이지)
+        .mockResolvedValueOnce({
+          Items: [makeItem({ contactId: 'c2', riskLevel: '주의', recipientId: 'r2', callDate: today })],
+        });
+
+      const result = await handler(makeEvent('GET', '/calls/at-risk'));
+      const body = JSON.parse(result.body);
+
+      expect(result.statusCode).toBe(200);
+      // ✓ c6 - 두 페이지 합산 결과(2건)가 반환되어야 함
+      expect(body.atRisk).toHaveLength(2);
+      // ✓ c6 - DynamoDB QueryCommand가 2회 호출되어야 함
+      expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('에러 처리', () => {
     test('알 수 없는 경로는 404를 반환한다', async () => {
       const result = await handler(makeEvent('GET', '/unknown/path'));

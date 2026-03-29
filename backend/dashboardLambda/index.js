@@ -33,7 +33,9 @@ async function getRecipientList() {
     } while (exclusiveStartKey);
     return allItems;
   } catch (err) {
-    throw new DatabaseError(`대상자 목록 조회 실패: ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[DashboardLambda] 대상자 목록 조회 실패:', err);
+    throw new DatabaseError('대상자 목록 조회에 실패했습니다.');
   }
 }
 
@@ -46,30 +48,40 @@ async function getTodayCallStatus() {
   // ✓ c3 - UTC toISOString() 직접 사용 대신 KST(Asia/Seoul, UTC+9) 기준 YYYY-MM-DD 계산
   const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   try {
-    // ✓ c6 - QueryCommand with callDate-index GSI
-    const result = await dynamodb.send(
-      new QueryCommand({
+    // ✓ c6 - QueryCommand with callDate-index GSI, ExclusiveStartKey 기반 페이지네이션 루프
+    const allItems = [];
+    let exclusiveStartKey;
+    do {
+      const params = {
         TableName: CALL_RECORDS_TABLE,
         IndexName: 'callDate-index',
         KeyConditionExpression: 'callDate = :today',
         ExpressionAttributeValues: { ':today': { S: today } },
-      })
-    );
-    const records = (result.Items || []).map((item) => unmarshall(item));
+      };
+      if (exclusiveStartKey) {
+        params.ExclusiveStartKey = exclusiveStartKey;
+      }
+      const result = await dynamodb.send(new QueryCommand(params));
+      (result.Items || []).forEach((item) => allItems.push(unmarshall(item)));
+      exclusiveStartKey = result.LastEvaluatedKey;
+    } while (exclusiveStartKey);
+
     const riskCounts = { 정상: 0, 주의: 0, 위험: 0 };
-    for (const r of records) {
+    for (const r of allItems) {
       if (r.riskLevel && riskCounts[r.riskLevel] !== undefined) {
         riskCounts[r.riskLevel]++;
       }
     }
     return {
       date: today,
-      total: records.length,
+      total: allItems.length,
       riskCounts,
-      records,
+      records: allItems,
     };
   } catch (err) {
-    throw new DatabaseError(`오늘의 통화 현황 조회 실패: ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[DashboardLambda] 오늘의 통화 현황 조회 실패:', err);
+    throw new DatabaseError('오늘의 통화 현황 조회에 실패했습니다.');
   }
 }
 
@@ -82,9 +94,11 @@ async function getAtRiskList() {
   // ✓ c3 - UTC toISOString() 직접 사용 대신 KST(Asia/Seoul, UTC+9) 기준 YYYY-MM-DD 계산
   const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   try {
-    // ✓ c6 - QueryCommand with callDate-index GSI, FilterExpression으로 위험/주의 필터링
-    const result = await dynamodb.send(
-      new QueryCommand({
+    // ✓ c6 - QueryCommand with callDate-index GSI, ExclusiveStartKey 기반 페이지네이션 루프
+    const allItems = [];
+    let exclusiveStartKey;
+    do {
+      const params = {
         TableName: CALL_RECORDS_TABLE,
         IndexName: 'callDate-index',
         KeyConditionExpression: 'callDate = :today',
@@ -94,11 +108,19 @@ async function getAtRiskList() {
           ':danger': { S: '위험' },
           ':caution': { S: '주의' },
         },
-      })
-    );
-    return (result.Items || []).map((item) => unmarshall(item));
+      };
+      if (exclusiveStartKey) {
+        params.ExclusiveStartKey = exclusiveStartKey;
+      }
+      const result = await dynamodb.send(new QueryCommand(params));
+      (result.Items || []).forEach((item) => allItems.push(unmarshall(item)));
+      exclusiveStartKey = result.LastEvaluatedKey;
+    } while (exclusiveStartKey);
+    return allItems;
   } catch (err) {
-    throw new DatabaseError(`위험군 목록 조회 실패: ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[DashboardLambda] 위험군 목록 조회 실패:', err);
+    throw new DatabaseError('위험군 목록 조회에 실패했습니다.');
   }
 }
 
@@ -124,7 +146,9 @@ async function getCallHistory(recipientId) {
       .map((item) => unmarshall(item))
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   } catch (err) {
-    throw new DatabaseError(`통화 이력 조회 실패: ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[DashboardLambda] 통화 이력 조회 실패:', err);
+    throw new DatabaseError('통화 이력 조회에 실패했습니다.');
   }
 }
 

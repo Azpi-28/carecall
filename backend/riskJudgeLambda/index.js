@@ -33,7 +33,9 @@ async function analyzeWithComprehend(text) {
       sentimentScore: result.SentimentScore,
     };
   } catch (err) {
-    throw new ExternalServiceError(`Comprehend 감정 분석 실패: ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[RiskJudgeLambda] Comprehend 감정 분석 실패:', err);
+    throw new ExternalServiceError('Comprehend 감정 분석에 실패했습니다.');
   }
 }
 
@@ -103,7 +105,9 @@ ${transcribedText}
       const isAppError = err instanceof AppError;
       // AppError 중 ExternalServiceError만 재시도, 그 외 AppError는 즉시 던짐
       if (isAppError && !(err instanceof ExternalServiceError)) throw err;
-      lastError = isAppError ? err : new ExternalServiceError(`Bedrock 위험도 판단 실패: ${err.message}`);
+      // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+      if (!isAppError) console.error('[RiskJudgeLambda] Bedrock 위험도 판단 실패:', err);
+      lastError = isAppError ? err : new ExternalServiceError('Bedrock 위험도 판단에 실패했습니다.');
       // ✓ c2 - 마지막 시도가 아니면 1초 대기 후 재시도
       if (attempt < MAX_ATTEMPTS) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -142,12 +146,15 @@ async function sendSnsAlert(alertData) {
     );
   } catch (err) {
     if (err instanceof AppError) throw err;
-    throw new ExternalServiceError(`SNS 알림 발송 실패: ${err.message}`);
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[RiskJudgeLambda] SNS 알림 발송 실패:', err);
+    throw new ExternalServiceError('SNS 알림 발송에 실패했습니다.');
   }
 }
 
 /**
  * 통화 분석 결과를 DynamoDB에 저장한다.
+ * ✓ c4 - ConditionExpression으로 동일 contactId 중복 저장 방지
  * @param {Object} record - 저장할 통화 기록
  */
 async function saveCallRecord(record) {
@@ -156,10 +163,15 @@ async function saveCallRecord(record) {
       new PutItemCommand({
         TableName: CALL_RECORDS_TABLE,
         Item: marshall(record, { removeUndefinedValues: true }),
+        // ✓ c4 - 동일 contactId로 재호출 시 ConditionalCheckFailedException 발생
+        ConditionExpression: 'attribute_not_exists(contactId)',
       })
     );
   } catch (err) {
-    throw new DatabaseError(`DynamoDB 통화 기록 저장 실패: ${err.message}`);
+    // ✓ c4 - ConditionalCheckFailedException을 DatabaseError로 감싸 처리
+    // ✓ c5 - 원본 err는 console.error로만 기록, 외부 노출용 일반 메시지 사용
+    console.error('[RiskJudgeLambda] DynamoDB 통화 기록 저장 실패:', err);
+    throw new DatabaseError('DynamoDB 통화 기록 저장에 실패했습니다.');
   }
 }
 
@@ -170,6 +182,11 @@ async function saveCallRecord(record) {
  */
 exports.handler = async (event) => {
   try {
+    // ✓ c3 - handler 최상단에서 필수 환경변수 검증, 누락 시 즉시 ExternalServiceError 던짐
+    if (!process.env.SNS_ALERT_TOPIC_ARN) {
+      throw new ExternalServiceError('필수 환경변수 SNS_ALERT_TOPIC_ARN이 설정되지 않았습니다.');
+    }
+
     const { contactId, recipientId, recipientName, transcribedText } = event;
 
     if (!contactId || !recipientId || transcribedText === undefined || transcribedText === null) {
