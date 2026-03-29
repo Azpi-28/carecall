@@ -1,4 +1,5 @@
-// ✓ c4 - API Gateway + Lambda 대시보드 API: 대상자 목록, 오늘의 통화 현황, 위험군 목록 엔드포인트
+// ✓ c7 - API Gateway + Lambda 대시보드 API: path.endsWith()로 스테이지 prefix 포함 라우팅
+// 대상자 목록, 오늘의 통화 현황, 위험군 목록 엔드포인트
 'use strict';
 
 const { DynamoDBClient, ScanCommand, QueryCommand } = require('@aws-sdk/client-dynamodb');
@@ -12,7 +13,6 @@ const CALL_RECORDS_TABLE = process.env.CALL_RECORDS_TABLE || 'WelfareCallRecords
 
 /**
  * 대상자 전체 목록을 DynamoDB에서 조회한다.
- * ✓ c4 - 대상자 목록 엔드포인트
  * @returns {Promise<Array>}
  */
 async function getRecipientList() {
@@ -25,17 +25,19 @@ async function getRecipientList() {
 }
 
 /**
- * 오늘의 통화 현황을 DynamoDB에서 조회한다.
- * ✓ c4 - 오늘의 통화 현황 엔드포인트
+ * 오늘의 통화 현황을 DynamoDB QueryCommand(callDate-index GSI)로 조회한다.
+ * ✓ c6 - ScanCommand 대신 QueryCommand, callDate-index GSI(callDate 키) IndexName 지정
  * @returns {Promise<Object>} { total, completed, riskCounts }
  */
 async function getTodayCallStatus() {
   const today = new Date().toISOString().slice(0, 10);
   try {
+    // ✓ c6 - QueryCommand with callDate-index GSI
     const result = await dynamodb.send(
-      new ScanCommand({
+      new QueryCommand({
         TableName: CALL_RECORDS_TABLE,
-        FilterExpression: 'callDate = :today',
+        IndexName: 'callDate-index',
+        KeyConditionExpression: 'callDate = :today',
         ExpressionAttributeValues: { ':today': { S: today } },
       })
     );
@@ -58,17 +60,22 @@ async function getTodayCallStatus() {
 }
 
 /**
- * 위험군(위험 또는 주의) 목록을 DynamoDB에서 조회한다.
- * ✓ c4 - 위험군 목록 엔드포인트
+ * 위험군(위험 또는 주의) 목록을 DynamoDB QueryCommand(callDate-index GSI)로 조회한다.
+ * ✓ c6 - ScanCommand 대신 QueryCommand, callDate-index GSI(callDate 키) IndexName 지정
  * @returns {Promise<Array>}
  */
 async function getAtRiskList() {
+  const today = new Date().toISOString().slice(0, 10);
   try {
+    // ✓ c6 - QueryCommand with callDate-index GSI, FilterExpression으로 위험/주의 필터링
     const result = await dynamodb.send(
-      new ScanCommand({
+      new QueryCommand({
         TableName: CALL_RECORDS_TABLE,
+        IndexName: 'callDate-index',
+        KeyConditionExpression: 'callDate = :today',
         FilterExpression: 'riskLevel = :danger OR riskLevel = :caution',
         ExpressionAttributeValues: {
+          ':today': { S: today },
           ':danger': { S: '위험' },
           ':caution': { S: '주의' },
         },
@@ -81,17 +88,20 @@ async function getAtRiskList() {
 }
 
 /**
- * 특정 대상자의 통화 이력을 조회한다.
+ * 특정 대상자의 통화 이력을 DynamoDB QueryCommand(recipientId-index GSI)로 조회한다.
+ * ✓ c6 - ScanCommand 대신 QueryCommand, recipientId-index GSI(recipientId 키) IndexName 지정
  * @param {string} recipientId
  * @returns {Promise<Array>}
  */
 async function getCallHistory(recipientId) {
   if (!recipientId) throw new ValidationError('recipientId가 필요합니다.');
   try {
+    // ✓ c6 - QueryCommand with recipientId-index GSI
     const result = await dynamodb.send(
-      new ScanCommand({
+      new QueryCommand({
         TableName: CALL_RECORDS_TABLE,
-        FilterExpression: 'recipientId = :rid',
+        IndexName: 'recipientId-index',
+        KeyConditionExpression: 'recipientId = :rid',
         ExpressionAttributeValues: { ':rid': { S: String(recipientId) } },
       })
     );
@@ -123,7 +133,7 @@ function buildResponse(statusCode, body) {
 
 /**
  * Lambda 핸들러: API Gateway로부터 라우팅
- * ✓ c4 - GET /recipients, GET /calls/today, GET /calls/at-risk, GET /calls/history/{recipientId}
+ * ✓ c7 - path 매칭에 path.endsWith()를 사용하여 API Gateway 스테이지 prefix(/prod/recipients 등) 포함 시에도 올바르게 라우팅
  * ✓ c6 - try-catch 에러 처리 및 HTTP 상태 코드 반환
  */
 exports.handler = async (event) => {
@@ -137,27 +147,28 @@ exports.handler = async (event) => {
   }
 
   try {
-    // ✓ c4 - 대상자 목록 엔드포인트
-    if (method === 'GET' && path === '/recipients') {
+    // ✓ c7 - path.endsWith()로 스테이지 prefix 포함 경로도 정상 라우팅 (예: /prod/recipients)
+    if (method === 'GET' && path.endsWith('/recipients')) {
       const recipients = await getRecipientList();
       return buildResponse(200, { recipients });
     }
 
-    // ✓ c4 - 오늘의 통화 현황 엔드포인트
-    if (method === 'GET' && path === '/calls/today') {
+    // ✓ c7 - path.endsWith()로 스테이지 prefix 포함 경로도 정상 라우팅 (예: /prod/calls/today)
+    if (method === 'GET' && path.endsWith('/calls/today')) {
       const status = await getTodayCallStatus();
       return buildResponse(200, status);
     }
 
-    // ✓ c4 - 위험군 목록 엔드포인트
-    if (method === 'GET' && path === '/calls/at-risk') {
+    // ✓ c7 - path.endsWith()로 스테이지 prefix 포함 경로도 정상 라우팅 (예: /prod/calls/at-risk)
+    if (method === 'GET' && path.endsWith('/calls/at-risk')) {
       const atRisk = await getAtRiskList();
       return buildResponse(200, { atRisk });
     }
 
-    // 통화 이력 조회 엔드포인트
-    if (method === 'GET' && (path.startsWith('/calls/history/') || pathParams.recipientId)) {
-      const recipientId = pathParams.recipientId || path.split('/calls/history/')[1];
+    // ✓ c7 - 정규식으로 /calls/history/{recipientId} 패턴 매칭 (스테이지 prefix 포함 허용)
+    const historyMatch = path.match(/\/calls\/history\/([^/]+)$/);
+    if (method === 'GET' && (historyMatch || pathParams.recipientId)) {
+      const recipientId = pathParams.recipientId || (historyMatch && historyMatch[1]);
       const history = await getCallHistory(recipientId);
       return buildResponse(200, { recipientId, history });
     }

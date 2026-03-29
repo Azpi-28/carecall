@@ -1,8 +1,8 @@
-// ✓ c2 - RiskJudge Lambda: Transcribe 텍스트 + Comprehend 감정 분석 결과를 Bedrock으로 종합 위험도 판단
-// ✓ c3 - 위험도 '위험'/'주의' 시 SNS 알림 발송 및 DynamoDB 저장
+// RiskJudge Lambda: Transcribe 텍스트 + Comprehend 감정 분석 결과를 Bedrock으로 종합 위험도 판단
+// 위험도 '위험'/'주의' 시 SNS 알림 발송 및 DynamoDB 저장
 'use strict';
 
-const { DynamoDBClient, PutItemCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBClient, PutItemCommand } = require('@aws-sdk/client-dynamodb');
 const { ComprehendClient, DetectSentimentCommand } = require('@aws-sdk/client-comprehend');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
@@ -39,10 +39,10 @@ async function analyzeWithComprehend(text) {
 
 /**
  * Amazon Bedrock (Claude)으로 통화 텍스트와 감정 분석 결과를 종합하여 위험도를 판단한다.
- * ✓ c2 - Bedrock에 Transcribe 텍스트와 Comprehend 결과를 전달하여 정상/주의/위험 반환
+ * ✓ c4 - 정규식으로 응답 문자열에서 JSON 부분을 추출한 뒤 파싱, 추출 실패 시 ExternalServiceError 던짐
  * @param {string} transcribedText - Transcribe 변환 텍스트
  * @param {Object} comprehendResult - Comprehend 감정 분석 결과
- * @returns {Promise<string>} '정상' | '주의' | '위험'
+ * @returns {Promise<Object>} { riskLevel: '정상' | '주의' | '위험', reason: string }
  */
 async function judgeRiskWithBedrock(transcribedText, comprehendResult) {
   const prompt = `당신은 독거노인 안부 통화 분석 전문가입니다.
@@ -81,7 +81,15 @@ ${transcribedText}
 
     const responseBody = JSON.parse(Buffer.from(response.body).toString('utf-8'));
     const text = responseBody.content[0].text.trim();
-    const parsed = JSON.parse(text);
+
+    // ✓ c4 - JSON.parse(text) 직접 호출 대신 정규식으로 응답 문자열에서 JSON 부분 추출
+    const jsonMatch = text.match(/{[\s\S]*}/);
+    if (!jsonMatch) {
+      // ✓ c4 - 추출 실패 시 ExternalServiceError를 던진다
+      throw new ExternalServiceError('Bedrock 응답에서 JSON을 추출할 수 없습니다.');
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
 
     if (!['정상', '주의', '위험'].includes(parsed.riskLevel)) {
       throw new ExternalServiceError('Bedrock 응답의 riskLevel 값이 올바르지 않습니다.');
@@ -96,7 +104,6 @@ ${transcribedText}
 
 /**
  * SNS를 통해 담당 복지사에게 알림을 발송한다.
- * ✓ c3 - 위험도 '위험' 또는 '주의' 시 SNS 알림 발송
  * @param {Object} alertData - { recipientId, recipientName, riskLevel, reason, contactId }
  */
 async function sendSnsAlert(alertData) {
@@ -128,7 +135,6 @@ async function sendSnsAlert(alertData) {
 
 /**
  * 통화 분석 결과를 DynamoDB에 저장한다.
- * ✓ c3 - DynamoDB에 분석 결과 저장
  * @param {Object} record - 저장할 통화 기록
  */
 async function saveCallRecord(record) {
@@ -146,6 +152,7 @@ async function saveCallRecord(record) {
 
 /**
  * Lambda 핸들러: Amazon Connect Contact Flow에서 호출
+ * ✓ c5 - sendSnsAlert() 호출이 try-catch로 독립 래핑되어 SNS 실패 시 에러 전파 없이 console.error 로깅 후 정상 응답(200) 반환
  * ✓ c6 - try-catch 에러 처리 및 HTTP 상태 코드 반환
  */
 exports.handler = async (event) => {
@@ -156,10 +163,10 @@ exports.handler = async (event) => {
       throw new ValidationError('필수 파라미터(contactId, recipientId, transcribedText)가 없습니다.');
     }
 
-    // ✓ c2 - Comprehend 감정 분석 수행
+    // Comprehend 감정 분석 수행
     const comprehendResult = await analyzeWithComprehend(transcribedText);
 
-    // ✓ c2 - Bedrock으로 Transcribe 텍스트 + Comprehend 결과 전달하여 위험도 판단 (정상/주의/위험)
+    // ✓ c4 - Bedrock으로 Transcribe 텍스트 + Comprehend 결과 전달, 정규식 기반 JSON 추출 파싱
     const { riskLevel, reason } = await judgeRiskWithBedrock(transcribedText, comprehendResult);
 
     const timestamp = new Date().toISOString();
@@ -176,14 +183,20 @@ exports.handler = async (event) => {
       callDate: timestamp.slice(0, 10),
     };
 
-    // ✓ c3 - DynamoDB에 통화 결과 저장
+    // DynamoDB에 통화 결과 저장
     await saveCallRecord(callRecord);
 
-    // ✓ c3 - 위험도가 '위험' 또는 '주의'일 때 SNS 알림 발송
+    // ✓ c5 - sendSnsAlert() 호출을 try-catch로 독립 래핑하여 SNS 실패를 격리
     if (riskLevel === '위험' || riskLevel === '주의') {
-      await sendSnsAlert({ recipientId, recipientName, riskLevel, reason, contactId });
+      try {
+        // ✓ c5 - SNS 발송 실패 시 에러를 전파하지 않고 console.error로 로깅만 한 뒤 계속 진행
+        await sendSnsAlert({ recipientId, recipientName, riskLevel, reason, contactId });
+      } catch (snsErr) {
+        console.error('[RiskJudgeLambda] SNS 알림 발송 실패 (격리됨):', snsErr);
+      }
     }
 
+    // ✓ c5 - SNS 실패와 무관하게 정상 응답(200) 반환
     return {
       statusCode: 200,
       body: JSON.stringify({ contactId, riskLevel, reason, message: '위험도 판단 완료' }),
