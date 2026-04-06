@@ -20,8 +20,8 @@ function RecipientList({ recipients, onSelect }) {
     setList((prev) =>
       prev.map((r) =>
         r.recipientId === recipientId ? { ...r, lastRiskLevel: newRiskLevel } : r
-              )
-           );
+      )
+    );
   };
   if (!recipients || recipients.length === 0) {
     return <p style={styles.empty}>등록된 대상자가 없습니다.</p>;
@@ -50,14 +50,29 @@ function RecipientList({ recipients, onSelect }) {
               <td style={styles.td}>{r.phoneNumber}</td>
               <td style={styles.td}>{r.address}</td>
               <td style={styles.td}>{r.assignedWorker || '-'}</td>
-              <td style={styles.td}>
-                {r.lastRiskLevel ? (
-                  <span style={{ ...styles.badge, ...RISK_BADGE[r.lastRiskLevel] }}>
-                    {r.lastRiskLevel}
+              <td
+                style={styles.td}
+                onMouseEnter={() => setHoveredId(r.recipientId)}
+                onMouseLeave={() => setHoveredId(null)}
+              >
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  {r.lastRiskLevel ? (
+                    <span style={{ ...styles.badge, ...RISK_BADGE[r.lastRiskLevel] }}>
+                      {r.lastRiskLevel}
+                    </span>
+                  ) : (
+                    <span style={{ ...styles.badge, background: '#8c8c8c', color: '#fff' }}>미통화</span>
+                  )}
+                  <span
+                    style={{
+                      ...styles.editHint,
+                      opacity: hoveredId === r.recipientId ? 1 : 0,
+                    }}
+                    onClick={() => setCorrecting({ recipient: r })}
+                  >
+                    ✏️
                   </span>
-                ) : (
-                  <span style={{ ...styles.badge, background: '#8c8c8c', color: '#fff' }}>미통화</span>
-                )}
+                </div>
               </td>
               <td style={styles.td}>
                 <button style={styles.button} onClick={() => onSelect && onSelect(r)}>
@@ -68,6 +83,14 @@ function RecipientList({ recipients, onSelect }) {
           ))}
         </tbody>
       </table>
+      {correcting && (
+        <RiskCorrectionModal
+          recipient={correcting.recipient}
+          currentRiskLevel={correcting.recipient.lastRiskLevel}
+          onConfirm={handleConfirm}
+          onClose={() => setCorrecting(null)}
+        />
+      )}
     </div>
   );
 }
@@ -82,6 +105,11 @@ const styles = {
   badge: { padding: '2px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: '600' },
   button: { padding: '4px 12px', fontSize: '12px', cursor: 'pointer', border: '1px solid #1890ff', color: '#1890ff', background: '#fff', borderRadius: '4px' },
   empty: { color: '#999' },
+  editHint: {
+    fontSize: '13px', cursor: 'pointer',
+    transition: 'opacity 0.15s ease',
+    userSelect: 'none', marginLeft: '4px',
+  },
 };
 
 export default RecipientList;
