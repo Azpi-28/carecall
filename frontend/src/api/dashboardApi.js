@@ -36,3 +36,12 @@ export async function fetchCallHistory(recipientId) {
   const data = await apiFetch(`/calls/history/${recipientId}`);
   return data.history || [];
 }
+
+/** 위험도 수정 */
+export async function updateRiskLevel({ recipientId, newRiskLevel, reason }) {
+  return apiFetch(`/recipients/${recipientId}/risk-correction`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newRiskLevel, reason }),
+  });
+}
